@@ -1,10 +1,13 @@
 FROM golang:1.24 AS builder
 
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
 WORKDIR /workspace
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -a -o kubevirt-aie-webhook .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o kubevirt-aie-webhook .
 
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /

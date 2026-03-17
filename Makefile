@@ -43,6 +43,18 @@ image-build:
 image-push:
 	$(CONTAINER_ENGINE) push $(IMG)
 
+.PHONY: image-build-multiarch
+image-build-multiarch:
+	hack/build-multiarch.sh
+
+.PHONY: image-push-multiarch
+image-push-multiarch: image-build-multiarch
+	hack/push-multiarch.sh
+
+.PHONY: image-manifest
+image-manifest: image-push-multiarch
+	hack/push-container-manifest.sh
+
 HELM ?= $(LOCALBIN)/helm
 .PHONY: helm
 helm: $(HELM)
