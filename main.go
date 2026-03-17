@@ -83,54 +83,62 @@ func (r *configMapReconciler) Reconcile(ctx context.Context, req reconcile.Reque
 	return reconcile.Result{}, nil
 }
 
-//nolint:funlen
-func main() {
-	var (
-		metricsAddr                                        string
-		metricsCertPath, metricsCertName, metricsCertKey   string
-		webhookCertPath, webhookCertName, webhookCertKey   string
-		probeAddr                                          string
-		secureMetrics                                      bool
-		enableHTTP2                                        bool
-		cipherSuitesFlag                                   string
-		minTLSVersion                                      string
-		tlsOpts                                            []func(*tls.Config)
-	)
+type serverConfig struct {
+	metricsAddr   string
+	probeAddr     string
+	secureMetrics bool
+	enableHTTP2   bool
 
-	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
+	metricsCertPath string
+	metricsCertName string
+	metricsCertKey  string
+
+	webhookCertPath string
+	webhookCertName string
+	webhookCertKey  string
+
+	cipherSuites  string
+	minTLSVersion string
+}
+
+func parseFlags() serverConfig {
+	var cfg serverConfig
+
+	flag.StringVar(&cfg.metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&secureMetrics, "metrics-secure", true,
+	flag.StringVar(&cfg.probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.BoolVar(&cfg.secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
-	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
-	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
-	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
-	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
+	flag.StringVar(&cfg.webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
+	flag.StringVar(&cfg.webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
+	flag.StringVar(&cfg.webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
+	flag.StringVar(&cfg.metricsCertPath, "metrics-cert-path", "",
 		"The directory that contains the metrics server certificate.")
-	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
-	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
-	flag.BoolVar(&enableHTTP2, "enable-http2", false,
+	flag.StringVar(&cfg.metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
+	flag.StringVar(&cfg.metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
+	flag.BoolVar(&cfg.enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 
-	flag.StringVar(&cipherSuitesFlag, "tls-cipher-suites", "",
+	flag.StringVar(&cfg.cipherSuites, "tls-cipher-suites", "",
 		"Comma-separated list of cipher suites for the server. "+
 			"If omitted, the default Go cipher suites will be used. \n"+
 			"Preferred values: "+strings.Join(cliflag.PreferredTLSCipherNames(), ", ")+". \n"+
 			"Insecure values: "+strings.Join(cliflag.InsecureTLSCipherNames(), ", ")+".")
-	flag.StringVar(&minTLSVersion, "tls-min-version", "",
+	flag.StringVar(&cfg.minTLSVersion, "tls-min-version", "",
 		"Minimum TLS version supported. "+
 			"Possible values: "+strings.Join(cliflag.TLSPossibleVersions(), ", "))
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	namespace := os.Getenv("NAMESPACE")
-	if namespace == "" {
-		namespace = "kubevirt"
-	}
+	return cfg
+}
+
+func buildTLSOpts(cfg serverConfig) []func(*tls.Config) {
+	var tlsOpts []func(*tls.Config)
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -138,56 +146,68 @@ func main() {
 	// Rapid Reset CVEs. For more information see:
 	// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
 	// - https://github.com/advisories/GHSA-4374-p667-p6c8
-	disableHTTP2 := func(c *tls.Config) {
-		setupLog.Info("disabling http/2")
-		c.NextProtos = []string{"http/1.1"}
+	if !cfg.enableHTTP2 {
+		tlsOpts = append(tlsOpts, func(c *tls.Config) {
+			setupLog.Info("disabling http/2")
+			c.NextProtos = []string{"http/1.1"}
+		})
 	}
 
-	if !enableHTTP2 {
-		tlsOpts = append(tlsOpts, disableHTTP2)
+	tlsOpts = appendCipherSuites(setupLog, tlsOpts, cfg.cipherSuites)
+	tlsOpts = appendMinTLSVersion(setupLog, tlsOpts, cfg.minTLSVersion)
+
+	return tlsOpts
+}
+
+func newWebhookServer(cfg serverConfig, tlsOpts []func(*tls.Config)) webhook.Server {
+	opts := webhook.Options{
+		TLSOpts: tlsOpts,
 	}
 
-	var cipherSuites []string
-	if cipherSuitesFlag != "" {
-		cipherSuites = strings.Split(cipherSuitesFlag, ",")
-	}
-	tlsOpts = appendCipherSuites(setupLog, tlsOpts, cipherSuites)
-	tlsOpts = appendMinTLSVersion(setupLog, tlsOpts, minTLSVersion)
-
-	webhookTLSOpts := tlsOpts
-	webhookServerOptions := webhook.Options{
-		TLSOpts: webhookTLSOpts,
-	}
-
-	if webhookCertPath != "" {
+	if cfg.webhookCertPath != "" {
 		setupLog.Info("Initializing webhook certificate watcher using provided certificates",
-			"webhook-cert-path", webhookCertPath, "webhook-cert-name", webhookCertName, "webhook-cert-key", webhookCertKey)
+			"webhook-cert-path", cfg.webhookCertPath, "webhook-cert-name", cfg.webhookCertName, "webhook-cert-key", cfg.webhookCertKey)
 
-		webhookServerOptions.CertDir = webhookCertPath
-		webhookServerOptions.CertName = webhookCertName
-		webhookServerOptions.KeyName = webhookCertKey
+		opts.CertDir = cfg.webhookCertPath
+		opts.CertName = cfg.webhookCertName
+		opts.KeyName = cfg.webhookCertKey
 	}
 
-	webhookServer := webhook.NewServer(webhookServerOptions)
+	return webhook.NewServer(opts)
+}
 
-	metricsServerOptions := metricsserver.Options{
-		BindAddress:   metricsAddr,
-		SecureServing: secureMetrics,
+func newMetricsServerOptions(cfg serverConfig, tlsOpts []func(*tls.Config)) metricsserver.Options {
+	opts := metricsserver.Options{
+		BindAddress:   cfg.metricsAddr,
+		SecureServing: cfg.secureMetrics,
 		TLSOpts:       tlsOpts,
 	}
 
-	if secureMetrics {
-		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
+	if cfg.secureMetrics {
+		opts.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	if metricsCertPath != "" {
+	if cfg.metricsCertPath != "" {
 		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
-			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
+			"metrics-cert-path", cfg.metricsCertPath, "metrics-cert-name", cfg.metricsCertName, "metrics-cert-key", cfg.metricsCertKey)
 
-		metricsServerOptions.CertDir = metricsCertPath
-		metricsServerOptions.CertName = metricsCertName
-		metricsServerOptions.KeyName = metricsCertKey
+		opts.CertDir = cfg.metricsCertPath
+		opts.CertName = cfg.metricsCertName
+		opts.KeyName = cfg.metricsCertKey
 	}
+
+	return opts
+}
+
+func main() {
+	cfg := parseFlags()
+
+	namespace := os.Getenv("NAMESPACE")
+	if namespace == "" {
+		namespace = "kubevirt"
+	}
+
+	tlsOpts := buildTLSOpts(cfg)
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
@@ -204,9 +224,9 @@ func main() {
 				},
 			},
 		},
-		Metrics:                metricsServerOptions,
-		HealthProbeBindAddress: probeAddr,
-		WebhookServer:          webhookServer,
+		Metrics:                newMetricsServerOptions(cfg, tlsOpts),
+		HealthProbeBindAddress: cfg.probeAddr,
+		WebhookServer:          newWebhookServer(cfg, tlsOpts),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create manager")
@@ -270,10 +290,11 @@ func main() {
 	}
 }
 
-func appendCipherSuites(setupLog logr.Logger, tlsOpts []func(*tls.Config), cipherSuites []string) []func(*tls.Config) {
-	if len(cipherSuites) == 0 {
+func appendCipherSuites(setupLog logr.Logger, tlsOpts []func(*tls.Config), cipherSuitesFlag string) []func(*tls.Config) {
+	if cipherSuitesFlag == "" {
 		return tlsOpts
 	}
+	cipherSuites := strings.Split(cipherSuitesFlag, ",")
 	cipherSuiteIDs, err := cliflag.TLSCipherSuites(cipherSuites)
 	if err != nil {
 		setupLog.Error(err, "failed to parse TLS cipher suites")
