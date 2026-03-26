@@ -5,6 +5,7 @@ ARG TARGETARCH=amd64
 
 WORKDIR /workspace
 COPY go.mod go.sum ./
+ENV GOFLAGS=-mod=mod
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -o kubevirt-aie-webhook .
