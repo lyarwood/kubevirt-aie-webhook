@@ -4,8 +4,9 @@ set -ex
 
 export KUBEVIRT_MEMORY_SIZE="${KUBEVIRT_MEMORY_SIZE:-16G}"
 export KUBEVIRT_REPO="${KUBEVIRT_REPO:-https://github.com/kubevirt/kubevirt.git}"
-export KUBEVIRT_BRANCH="${KUBEVIRT_BRANCH:-main}"
+export KUBEVIRT_BRANCH="${KUBEVIRT_BRANCH:-release-1.8}"
 export NAMESPACE="${NAMESPACE:-kubevirt}"
+export IOMMUFD_DEVICE_PLUGIN_TAG="${IOMMUFD_DEVICE_PLUGIN_TAG:-v0.0.1}"
 
 _base_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 _kubevirt_dir="${_base_dir}/_kubevirt"
@@ -155,6 +156,13 @@ EOF
     ca_bundle=$(base64 -w 0 < "${cert_dir}/ca.crt")
     KUBECONFIG="${kubeconfig}" ${_kubectl} patch mutatingwebhookconfiguration "${service_name}" \
         --type=json -p "[{\"op\":\"add\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${ca_bundle}\"}]"
+
+    echo "Deploying iommufd-device-plugin DaemonSet..."
+    curl -sL "https://raw.githubusercontent.com/kubevirt/iommufd-device-plugin/main/deploy/daemonset.yaml" | \
+        sed "s|iommufd-device-plugin:latest|iommufd-device-plugin:${IOMMUFD_DEVICE_PLUGIN_TAG}|" | \
+        KUBECONFIG="${kubeconfig}" ${_kubectl} apply -f -
+    KUBECONFIG="${kubeconfig}" ${_kubectl} rollout status daemonset/iommufd-device-plugin \
+        -n kube-system --timeout=2m
 
     echo "Labeling first worker node for node affinity tests..."
     local first_worker
