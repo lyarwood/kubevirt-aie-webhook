@@ -4,7 +4,7 @@ set -ex
 
 export KUBEVIRT_MEMORY_SIZE="${KUBEVIRT_MEMORY_SIZE:-16G}"
 export KUBEVIRT_REPO="${KUBEVIRT_REPO:-https://github.com/kubevirt/kubevirt.git}"
-export KUBEVIRT_BRANCH="${KUBEVIRT_BRANCH:-main}"
+export KUBEVIRT_BRANCH="${KUBEVIRT_BRANCH:-release-1.8}"
 export NAMESPACE="${NAMESPACE:-kubevirt}"
 
 _base_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
