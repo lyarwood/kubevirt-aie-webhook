@@ -116,7 +116,7 @@ handles all cluster lifecycle operations as subcommands (`up`, `down`, `sync`,
 `kubeconfig`, `kubectl`).
 
 `cluster-up` clones [kubevirt](https://github.com/kubevirt/kubevirt)
-(`main` branch by default) into `_kubevirt/` and delegates to its
+(`release-1.8` branch by default) into `_kubevirt/` and delegates to its
 `make cluster-up && make cluster-sync` to provision the kubevirtci cluster and
 deploy KubeVirt from source.
 
@@ -131,7 +131,7 @@ The `_kubevirt/` directory is gitignored and can be removed with `make clean`.
 |----------|---------|-------------|
 | `NAMESPACE` | `kubevirt` | Namespace where the ConfigMap is watched |
 | `KUBEVIRT_REPO` | `https://github.com/kubevirt/kubevirt.git` | KubeVirt git repository URL |
-| `KUBEVIRT_BRANCH` | `main` | KubeVirt branch to clone |
+| `KUBEVIRT_BRANCH` | `release-1.8` | KubeVirt branch to clone |
 | `KUBEVIRT_MEMORY_SIZE` | `16G` | Memory for kubevirtci cluster VMs |
 | `DOCKER_TAG` | `devel` | Tag for the webhook container image |
 | `DOCKER_PREFIX` | `quay.io/kubevirt` | Registry prefix for the webhook image |

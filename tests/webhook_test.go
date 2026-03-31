@@ -18,6 +18,7 @@ const (
 	alternativeLauncherAnnotation = "kubevirt.io/alternative-launcher-image"
 	nodeAffinityLabel             = "kubevirt-aie-webhook/node-affinity"
 	nodeLabel                     = "kubevirt-aie-webhook/node"
+	iommufdResourceName           = "devices.kubevirt.io/iommufd"
 	pollInterval                  = 2 * time.Second
 	pollTimeout                   = 5 * time.Minute
 )
@@ -62,7 +63,7 @@ func waitForVirtLauncherPod(namespace, vmiName string) *corev1.Pod {
 
 var _ = Describe("Webhook functional tests", func() {
 	Context("when a VMI has the alternative-launcher label", func() {
-		It("should mutate the virt-launcher pod image", func() {
+		It("should mutate the virt-launcher pod image and inject iommufd resource", func() {
 			vmi := newGuestlessVMI("test-mutated", testNamespace, map[string]string{
 				alternativeLauncherLabel: "true",
 			})
@@ -76,6 +77,21 @@ var _ = Describe("Webhook functional tests", func() {
 				"expected compute container image to be the devel_alt launcher image")
 			Expect(pod.Annotations).To(HaveKey(alternativeLauncherAnnotation),
 				"expected alternative-launcher-image annotation to be set")
+
+			By("verifying iommufd resource limit was injected")
+			limits := pod.Spec.Containers[0].Resources.Limits
+			Expect(limits).NotTo(BeNil(), "expected resource limits to be set")
+			qty, ok := limits[corev1.ResourceName(iommufdResourceName)]
+			Expect(ok).To(BeTrue(), "expected iommufd resource limit to be present")
+			Expect(qty.String()).To(Equal("1"), "expected iommufd resource limit to be 1")
+
+			By("verifying the VMI reaches Running")
+			Eventually(func(g Gomega) {
+				updatedVMI := &kubevirtv1.VirtualMachineInstance{}
+				g.Expect(k8sClient.Get(context.Background(), client.ObjectKeyFromObject(vmi), updatedVMI)).To(Succeed())
+				g.Expect(updatedVMI.Status.Phase).To(Equal(kubevirtv1.Running),
+					"expected VMI to reach Running phase")
+			}, pollTimeout, pollInterval).Should(Succeed())
 		})
 	})
 
@@ -92,6 +108,13 @@ var _ = Describe("Webhook functional tests", func() {
 				"expected compute container image to not contain devel_alt")
 			Expect(pod.Annotations).NotTo(HaveKey(alternativeLauncherAnnotation),
 				"expected alternative-launcher-image annotation to not be set")
+
+			By("verifying iommufd resource limit was not injected")
+			limits := pod.Spec.Containers[0].Resources.Limits
+			if limits != nil {
+				_, ok := limits[corev1.ResourceName(iommufdResourceName)]
+				Expect(ok).To(BeFalse(), "expected iommufd resource limit to not be present")
+			}
 		})
 	})
 

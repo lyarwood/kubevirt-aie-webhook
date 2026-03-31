@@ -147,7 +147,7 @@ make cluster-sync
 make cluster-down
 ```
 
-On first run, `cluster-up` clones kubevirt (`main` branch) into `_kubevirt/`,
+On first run, `cluster-up` clones kubevirt (`release-1.8` branch) into `_kubevirt/`,
 runs its `make cluster-up` to provision the kubevirtci cluster, then runs
 `make cluster-sync` to build and deploy KubeVirt from source.
 

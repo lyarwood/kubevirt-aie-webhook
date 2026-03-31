@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	jsonpatch "gomodules.xyz/jsonpatch/v2"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -20,7 +22,8 @@ import (
 )
 
 const (
-	annotationKey = "kubevirt.io/alternative-launcher-image"
+	annotationKey  = "kubevirt.io/alternative-launcher-image"
+	iommufdResource = "devices.kubevirt.io/iommufd"
 )
 
 // VirtLauncherMutator mutates virt-launcher pods to use alternative launcher images
@@ -86,6 +89,7 @@ func (m *VirtLauncherMutator) Handle(ctx context.Context, req admission.Request)
 	}
 
 	patches = append(patches, nodeAffinityPatches(pod, rule.NodeSelector)...)
+	patches = append(patches, iommufdResourcePatches(pod)...)
 
 	return admission.Patched("launcher image replaced", patches...)
 }
@@ -236,6 +240,56 @@ func nodeAffinityPatches(pod *corev1.Pod, nodeSelector *config.NodeSelector) []j
 		Operation: "add",
 		Path:      "/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution/nodeSelectorTerms/-",
 		Value:     term,
+	}}
+}
+
+// iommufdResourcePatches builds JSON patch operations to inject the
+// devices.kubevirt.io/iommufd resource limit on the compute container.
+// It returns nil if the compute container is not found or the resource
+// is already defined.
+func iommufdResourcePatches(pod *corev1.Pod) []jsonpatch.JsonPatchOperation {
+	idx := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool {
+		return c.Name == "compute"
+	})
+	if idx == -1 {
+		return nil
+	}
+
+	container := pod.Spec.Containers[idx]
+
+	if _, exists := container.Resources.Limits[corev1.ResourceName(iommufdResource)]; exists {
+		return nil
+	}
+
+	prefix := fmt.Sprintf("/spec/containers/%d", idx)
+	qty := resource.MustParse("1")
+
+	if container.Resources.Limits == nil && container.Resources.Requests == nil {
+		return []jsonpatch.JsonPatchOperation{{
+			Operation: "add",
+			Path:      prefix + "/resources",
+			Value: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceName(iommufdResource): qty,
+				},
+			},
+		}}
+	}
+
+	if container.Resources.Limits == nil {
+		return []jsonpatch.JsonPatchOperation{{
+			Operation: "add",
+			Path:      prefix + "/resources/limits",
+			Value: corev1.ResourceList{
+				corev1.ResourceName(iommufdResource): qty,
+			},
+		}}
+	}
+
+	return []jsonpatch.JsonPatchOperation{{
+		Operation: "add",
+		Path:      prefix + "/resources/limits/" + escapeJSONPointer(iommufdResource),
+		Value:     qty,
 	}}
 }
 
