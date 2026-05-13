@@ -726,6 +726,116 @@ var _ = Describe("VirtLauncherMutator", func() {
 			Fail("expected patch at /spec/containers/0/resources/limits/devices.kubevirt.io~1iommufd")
 		})
 	})
+
+	Context("VFIO memory overhead injection", func() {
+		It("should increase memory when multiple GPUs are present", func() {
+			altImage := "registry.example.com/aie-launcher:v1"
+			store := newStoreWithRules(config.Rule{
+				Name:  "gpu-rule",
+				Image: altImage,
+				Selector: config.Selector{
+					DeviceNames: []string{"nvidia.com/GB100"},
+				},
+			})
+
+			guestMem := resource.MustParse("8Gi")
+			vmi := &kubevirtv1.VirtualMachineInstance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmi",
+					Namespace: "default",
+				},
+				Spec: kubevirtv1.VirtualMachineInstanceSpec{
+					Domain: kubevirtv1.DomainSpec{
+						Memory: &kubevirtv1.Memory{Guest: &guestMem},
+						Devices: kubevirtv1.Devices{
+							GPUs: []kubevirtv1.GPU{
+								{Name: "gpu0", DeviceName: "nvidia.com/GB100"},
+								{Name: "gpu1", DeviceName: "nvidia.com/GB100"},
+							},
+						},
+					},
+				},
+			}
+
+			pod := newVirtLauncherPod("virt-launcher-test-vmi-multigpu", "default", "test-vmi")
+			pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("1528Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("1528Mi"),
+				},
+			}
+			k8sClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(vmi).Build()
+			mutator := newMutator(scheme, k8sClient, store)
+
+			resp := mutator.Handle(context.Background(), newAdmissionRequest(pod))
+			Expect(resp.Allowed).To(BeTrue())
+
+			expectedMemory := resource.MustParse("1528Mi")
+			expectedMemory.Set(expectedMemory.Value() + 8*1024*1024*1024)
+
+			for _, p := range resp.Patches {
+				if p.Path == "/spec/containers/0/resources/limits/memory" {
+					Expect(p.Operation).To(Equal("replace"))
+					Expect(p.Value).To(Equal(expectedMemory.String()))
+				}
+				if p.Path == "/spec/containers/0/resources/requests/memory" {
+					Expect(p.Operation).To(Equal("replace"))
+					Expect(p.Value).To(Equal(expectedMemory.String()))
+				}
+			}
+		})
+
+		It("should not add memory overhead for a single GPU", func() {
+			altImage := "registry.example.com/aie-launcher:v1"
+			store := newStoreWithRules(config.Rule{
+				Name:  "gpu-rule",
+				Image: altImage,
+				Selector: config.Selector{
+					DeviceNames: []string{"nvidia.com/GB100"},
+				},
+			})
+
+			vmi := &kubevirtv1.VirtualMachineInstance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmi",
+					Namespace: "default",
+				},
+				Spec: kubevirtv1.VirtualMachineInstanceSpec{
+					Domain: kubevirtv1.DomainSpec{
+						Devices: kubevirtv1.Devices{
+							GPUs: []kubevirtv1.GPU{
+								{Name: "gpu0", DeviceName: "nvidia.com/GB100"},
+							},
+						},
+					},
+				},
+			}
+
+			pod := newVirtLauncherPod("virt-launcher-test-vmi-singlegpu", "default", "test-vmi")
+			pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("1528Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("1528Mi"),
+				},
+			}
+			k8sClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(vmi).Build()
+			mutator := newMutator(scheme, k8sClient, store)
+
+			resp := mutator.Handle(context.Background(), newAdmissionRequest(pod))
+			Expect(resp.Allowed).To(BeTrue())
+
+			for _, p := range resp.Patches {
+				Expect(p.Path).ToNot(ContainSubstring("resources/limits/memory"),
+					"expected no memory limit patch for single GPU")
+				Expect(p.Path).ToNot(ContainSubstring("resources/requests/memory"),
+					"expected no memory request patch for single GPU")
+			}
+		})
+	})
 })
 
 func expectImagePatch(resp admission.Response, expectedImage string) {

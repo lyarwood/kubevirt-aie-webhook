@@ -90,6 +90,7 @@ func (m *VirtLauncherMutator) Handle(ctx context.Context, req admission.Request)
 
 	patches = append(patches, nodeAffinityPatches(pod, rule.NodeSelector)...)
 	patches = append(patches, iommufdResourcePatches(pod)...)
+	patches = append(patches, vfioMemoryOverheadPatches(pod, &vmi)...)
 
 	return admission.Patched("launcher image replaced", patches...)
 }
@@ -291,6 +292,63 @@ func iommufdResourcePatches(pod *corev1.Pod) []jsonpatch.JsonPatchOperation {
 		Path:      prefix + "/resources/limits/" + escapeJSONPointer(iommufdResource),
 		Value:     qty,
 	}}
+}
+
+// vfioMemoryOverheadPatches builds JSON patch operations to increase the compute
+// container's memory requests and limits to account for libvirt's per-device
+// memlock requirement. With a vIOMMU, libvirt locks the full guest memory per
+// VFIO device (qemuDomainGetMemLockLimitBytes). This adds (N-1) * guest_memory
+// for N VFIO devices, since the first device's memory is already covered.
+func vfioMemoryOverheadPatches(pod *corev1.Pod, vmi *kubevirtv1.VirtualMachineInstance) []jsonpatch.JsonPatchOperation {
+	numDevices := len(vmi.Spec.Domain.Devices.GPUs) + len(vmi.Spec.Domain.Devices.HostDevices)
+	if numDevices <= 1 {
+		return nil
+	}
+
+	var guestMemory *resource.Quantity
+	if vmi.Spec.Domain.Memory != nil && vmi.Spec.Domain.Memory.Guest != nil {
+		guestMemory = vmi.Spec.Domain.Memory.Guest
+	} else if req := vmi.Spec.Domain.Resources.Requests.Memory(); req != nil && !req.IsZero() {
+		guestMemory = req
+	}
+	if guestMemory == nil || guestMemory.IsZero() {
+		return nil
+	}
+
+	additionalBytes := guestMemory.Value() * int64(numDevices-1)
+
+	idx := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool {
+		return c.Name == "compute"
+	})
+	if idx == -1 {
+		return nil
+	}
+
+	container := pod.Spec.Containers[idx]
+	prefix := fmt.Sprintf("/spec/containers/%d", idx)
+	var patches []jsonpatch.JsonPatchOperation
+
+	if req, ok := container.Resources.Requests[corev1.ResourceMemory]; ok {
+		newReq := req.DeepCopy()
+		newReq.Set(newReq.Value() + additionalBytes)
+		patches = append(patches, jsonpatch.JsonPatchOperation{
+			Operation: "replace",
+			Path:      prefix + "/resources/requests/memory",
+			Value:     newReq.String(),
+		})
+	}
+
+	if lim, ok := container.Resources.Limits[corev1.ResourceMemory]; ok {
+		newLim := lim.DeepCopy()
+		newLim.Set(newLim.Value() + additionalBytes)
+		patches = append(patches, jsonpatch.JsonPatchOperation{
+			Operation: "replace",
+			Path:      prefix + "/resources/limits/memory",
+			Value:     newLim.String(),
+		})
+	}
+
+	return patches
 }
 
 // escapeJSONPointer escapes special characters in JSON Pointer tokens per RFC 6901.
