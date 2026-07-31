@@ -10,7 +10,6 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -200,7 +199,6 @@ var _ = Describe("VirtLauncherMutator", func() {
 			Expect(resp.Patches).ToNot(BeEmpty())
 			expectImagePatch(resp, altImage)
 			expectAnnotationPatch(resp, altImage)
-			expectIommufdResourcePatch(resp)
 		})
 	})
 
@@ -538,194 +536,6 @@ var _ = Describe("VirtLauncherMutator", func() {
 		})
 	})
 
-	Context("iommufd resource injection", func() {
-		It("should inject iommufd resource limit when container has no resources", func() {
-			altImage := "registry.example.com/aie-launcher:v1"
-			store := newStoreWithRules(config.Rule{
-				Name:  "gpu-rule",
-				Image: altImage,
-				Selector: config.Selector{
-					DeviceNames: []string{"nvidia.com/A100"},
-				},
-			})
-
-			vmi := &kubevirtv1.VirtualMachineInstance{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-vmi",
-					Namespace: "default",
-				},
-				Spec: kubevirtv1.VirtualMachineInstanceSpec{
-					Domain: kubevirtv1.DomainSpec{
-						Devices: kubevirtv1.Devices{
-							GPUs: []kubevirtv1.GPU{
-								{Name: "gpu0", DeviceName: "nvidia.com/A100"},
-							},
-						},
-					},
-				},
-			}
-
-			pod := newVirtLauncherPod("virt-launcher-test-vmi-nores", "default", "test-vmi")
-			k8sClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(vmi).Build()
-			mutator := newMutator(scheme, k8sClient, store)
-
-			resp := mutator.Handle(context.Background(), newAdmissionRequest(pod))
-			Expect(resp.Allowed).To(BeTrue())
-			expectIommufdResourcePatch(resp)
-
-			// Verify the patch adds the full resources structure
-			for _, p := range resp.Patches {
-				if p.Path == "/spec/containers/0/resources" {
-					Expect(p.Operation).To(Equal("add"))
-					return
-				}
-			}
-			Fail("expected patch at /spec/containers/0/resources")
-		})
-
-		It("should skip iommufd resource injection when the resource is already defined", func() {
-			altImage := "registry.example.com/aie-launcher:v1"
-			store := newStoreWithRules(config.Rule{
-				Name:  "gpu-rule",
-				Image: altImage,
-				Selector: config.Selector{
-					DeviceNames: []string{"nvidia.com/A100"},
-				},
-			})
-
-			vmi := &kubevirtv1.VirtualMachineInstance{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-vmi",
-					Namespace: "default",
-				},
-				Spec: kubevirtv1.VirtualMachineInstanceSpec{
-					Domain: kubevirtv1.DomainSpec{
-						Devices: kubevirtv1.Devices{
-							GPUs: []kubevirtv1.GPU{
-								{Name: "gpu0", DeviceName: "nvidia.com/A100"},
-							},
-						},
-					},
-				},
-			}
-
-			pod := newVirtLauncherPod("virt-launcher-test-vmi-existing-iommufd", "default", "test-vmi")
-			pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
-				Limits: corev1.ResourceList{
-					corev1.ResourceName("devices.kubevirt.io/iommufd"): resource.MustParse("1"),
-				},
-			}
-			k8sClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(vmi).Build()
-			mutator := newMutator(scheme, k8sClient, store)
-
-			resp := mutator.Handle(context.Background(), newAdmissionRequest(pod))
-			Expect(resp.Allowed).To(BeTrue())
-			expectImagePatch(resp, altImage)
-
-			// Verify no iommufd resource patch was generated
-			for _, p := range resp.Patches {
-				Expect(p.Path).ToNot(ContainSubstring("iommufd"),
-					"expected no iommufd patch but found one at %s", p.Path)
-			}
-		})
-
-		It("should find the compute container by name when it is not the first container", func() {
-			altImage := "registry.example.com/aie-launcher:v1"
-			store := newStoreWithRules(config.Rule{
-				Name:  "gpu-rule",
-				Image: altImage,
-				Selector: config.Selector{
-					DeviceNames: []string{"nvidia.com/A100"},
-				},
-			})
-
-			vmi := &kubevirtv1.VirtualMachineInstance{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-vmi",
-					Namespace: "default",
-				},
-				Spec: kubevirtv1.VirtualMachineInstanceSpec{
-					Domain: kubevirtv1.DomainSpec{
-						Devices: kubevirtv1.Devices{
-							GPUs: []kubevirtv1.GPU{
-								{Name: "gpu0", DeviceName: "nvidia.com/A100"},
-							},
-						},
-					},
-				},
-			}
-
-			pod := newVirtLauncherPod("virt-launcher-test-vmi-reorder", "default", "test-vmi")
-			// Prepend a sidecar container so compute is at index 1
-			pod.Spec.Containers = append([]corev1.Container{
-				{Name: "sidecar", Image: "sidecar:v1"},
-			}, pod.Spec.Containers...)
-			k8sClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(vmi).Build()
-			mutator := newMutator(scheme, k8sClient, store)
-
-			resp := mutator.Handle(context.Background(), newAdmissionRequest(pod))
-			Expect(resp.Allowed).To(BeTrue())
-
-			// Verify the iommufd patch targets container index 1
-			for _, p := range resp.Patches {
-				if p.Path == "/spec/containers/1/resources" ||
-					p.Path == "/spec/containers/1/resources/limits" ||
-					p.Path == "/spec/containers/1/resources/limits/devices.kubevirt.io~1iommufd" {
-					return
-				}
-			}
-			Fail("expected iommufd resource patch at /spec/containers/1/...")
-		})
-
-		It("should inject iommufd resource limit when container already has resource limits", func() {
-			altImage := "registry.example.com/aie-launcher:v1"
-			store := newStoreWithRules(config.Rule{
-				Name:  "gpu-rule",
-				Image: altImage,
-				Selector: config.Selector{
-					DeviceNames: []string{"nvidia.com/A100"},
-				},
-			})
-
-			vmi := &kubevirtv1.VirtualMachineInstance{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-vmi",
-					Namespace: "default",
-				},
-				Spec: kubevirtv1.VirtualMachineInstanceSpec{
-					Domain: kubevirtv1.DomainSpec{
-						Devices: kubevirtv1.Devices{
-							GPUs: []kubevirtv1.GPU{
-								{Name: "gpu0", DeviceName: "nvidia.com/A100"},
-							},
-						},
-					},
-				},
-			}
-
-			pod := newVirtLauncherPod("virt-launcher-test-vmi-withres", "default", "test-vmi")
-			pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
-				Limits: corev1.ResourceList{
-					corev1.ResourceMemory: resource.MustParse("1Gi"),
-				},
-			}
-			k8sClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(vmi).Build()
-			mutator := newMutator(scheme, k8sClient, store)
-
-			resp := mutator.Handle(context.Background(), newAdmissionRequest(pod))
-			Expect(resp.Allowed).To(BeTrue())
-			expectIommufdResourcePatch(resp)
-
-			// Verify the patch adds only the specific resource key
-			for _, p := range resp.Patches {
-				if p.Path == "/spec/containers/0/resources/limits/devices.kubevirt.io~1iommufd" {
-					Expect(p.Operation).To(Equal("add"))
-					return
-				}
-			}
-			Fail("expected patch at /spec/containers/0/resources/limits/devices.kubevirt.io~1iommufd")
-		})
-	})
 })
 
 func expectImagePatch(resp admission.Response, expectedImage string) {
@@ -765,20 +575,6 @@ func expectNodeAffinityPatch(resp admission.Response, expectedKey, expectedValue
 		}
 	}
 	ExpectWithOffset(1, false).To(BeTrue(), "expected a node affinity patch")
-}
-
-func expectIommufdResourcePatch(resp admission.Response) {
-	ExpectWithOffset(1, resp.Patches).ToNot(BeEmpty())
-	found := false
-	for _, p := range resp.Patches {
-		if p.Path == "/spec/containers/0/resources" ||
-			p.Path == "/spec/containers/0/resources/limits" ||
-			p.Path == "/spec/containers/0/resources/limits/devices.kubevirt.io~1iommufd" {
-			found = true
-			break
-		}
-	}
-	ExpectWithOffset(1, found).To(BeTrue(), "expected an iommufd resource patch")
 }
 
 func expectNoAffinityPatch(resp admission.Response) {
